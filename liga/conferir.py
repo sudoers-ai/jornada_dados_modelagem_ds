@@ -48,6 +48,17 @@ DICAS = {
 }
 
 
+def _v(valor):
+    """Valor para o aluno ler: nulo em vez de None, verdadeiro/falso em vez de True/False."""
+    if valor is None:
+        return "nulo"
+    if valor is True:
+        return "verdadeiro"
+    if valor is False:
+        return "falso"
+    return valor
+
+
 def _q(cur, consulta):
     cur.execute(consulta)
     return cur.fetchall()
@@ -185,7 +196,7 @@ def conferiu(tabela=None, silencioso=True):
                          % (", ".join("a.%s" % k for k in chave), c, c, base, filtro,
                             ", ".join("a.%s" % k for k in chave)))[0]
             onde = ", ".join("%s=%s" % (k, v) for k, v in zip(chave, ex[:len(chave)]))
-            detalhes = ["exemplo: %s → sua tabela: %s, esperado: %s" % (onde, ex[-2], ex[-1])]
+            detalhes = ["exemplo: %s → sua tabela: %s, esperado: %s" % (onde, _v(ex[-2]), _v(ex[-1]))]
             if (tabela, c) in DICAS:
                 detalhes.append("dica: " + DICAS[(tabela, c)])
             erro("%s: %s linhas diferentes da referência" % (c, _fmt(n)), *detalhes)
