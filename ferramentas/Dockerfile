@@ -20,4 +20,4 @@ WORKDIR /app
 EXPOSE 8888
 CMD ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser", \
      "--IdentityProvider.token=", "--ServerApp.password=", \
-     "--ServerApp.root_dir=/app", "--ServerApp.default_url=/lab/tree/notebooks"]
+     "--ServerApp.root_dir=/app", "--LabApp.default_url=/lab/tree/notebooks"]
