@@ -26,6 +26,13 @@ cada uma é uma armadilha que aparece de novo na etapa 2:
 O desenho completo, com a explicação de cada coluna, está em
 [`modelagem/dbml/dw_recebido.dbml`](../../modelagem/dbml/dw_recebido.dbml).
 
+> 📺 **Para revisar** (opcional, ~9 min). Quer ver como um Data Warehouse como este
+> é construído? Os dois vídeos abaixo mostram a passagem do transacional para o
+> modelo dimensional, no ambiente da disciplina de engenharia:
+>
+> - [Data Modeling 05 - Avançando para uma modelagem dimensional](https://www.youtube.com/watch?v=DZi_7rLBguk&list=PLD3-a_5KsN3mBrcfHfB8i3erZf_9eqfw8&index=6)
+> - [Data Modeling 06 - Construindo meu Data Warehouse (DW)](https://www.youtube.com/watch?v=7iB8tvWbVpw&list=PLD3-a_5KsN3mBrcfHfB8i3erZf_9eqfw8&index=7)
+
 ## ▶️ Passo a passo
 
 ### 1. Confira que o ambiente está no ar
