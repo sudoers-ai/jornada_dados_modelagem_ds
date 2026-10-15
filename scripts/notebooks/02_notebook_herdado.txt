@@ -1,0 +1,192 @@
+=== md
+# Etapa 2 — O notebook herdado
+
+> **Trilha:** 1 · **2** · 3 · 4 · 5 · 6 · 7 — roteiro completo em `trilha/02_notebook_herdado/README.md`
+
+Antes de você chegar, outra pessoa cuidava do modelo antifraude. Este notebook é o que
+ela deixou. Ele relatava **AUC de 0,99** — um modelo quase perfeito. A diretoria colocou
+em produção.
+
+Um mês depois, o antifraude não pegava nem metade das fraudes que o notebook prometia.
+
+A sua primeira missão: **rodar o notebook como ele era, ver o número bonito e descobrir
+onde ele mente.** Spoiler: o algoritmo está certo. O que está errado é a **tabela** que
+ele recebeu.
+=== code
+from liga import sql, executar, conferir, avaliar, progresso
+from liga.banco import motor
+=== md
+## Parte A — O notebook como ele era
+
+Não altere nada nesta parte. Só rode, e leia os comentários do autor.
+=== code
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.metrics import roc_auc_score
+
+# pega as vendas e junta tudo que tiver de informação
+itens    = sql("SELECT id_pedido, sk_pessoa, sk_dispositivo, sk_localidade, sk_forma_pagamento, "
+               "dt_venda, valor_total, qtde, status, is_fraude FROM fato_pedidos")
+pessoas  = sql("SELECT sk_pessoa, id AS id_pessoa FROM dim_pessoas")
+cadastro = sql("SELECT id AS id_pessoa, cidade AS cidade_cliente, uf AS uf_cliente "
+               "FROM dim_pessoas")                                                 # onde o cliente mora
+aparelho = sql("SELECT sk_dispositivo, qtd_contas AS qtd_contas_dispositivo FROM dim_dispositivo")
+lugar    = sql("SELECT sk_localidade, uf AS uf_compra FROM dim_localidade")
+pagto    = sql("SELECT sk_forma_pagamento, forma AS forma_pagamento FROM dim_forma_pagamento")
+
+df = (itens.merge(pessoas, on="sk_pessoa")
+           .merge(cadastro, on="id_pessoa")
+           .merge(aparelho, on="sk_dispositivo")
+           .merge(lugar, on="sk_localidade")
+           .merge(pagto, on="sk_forma_pagamento"))
+
+df["hora_venda"] = df.dt_venda.dt.hour
+# historico do cliente: o quanto ele costuma fraudar
+df["taxa_fraude_cliente"] = df.groupby("id_pessoa").is_fraude.transform("mean")
+print(len(df), "linhas prontas para o modelo")
+=== code
+features = ["valor_total", "qtde", "hora_venda", "forma_pagamento", "uf_compra", "uf_cliente",
+            "qtd_contas_dispositivo", "status", "taxa_fraude_cliente"]
+
+X = pd.get_dummies(df[features], dtype=float)
+y = df.is_fraude
+
+X_treino, X_teste, y_treino, y_teste = train_test_split(X, y, test_size=0.25, random_state=42)
+modelo = HistGradientBoostingClassifier(random_state=0).fit(X_treino, y_treino)
+
+print("AUC no teste: %.3f" % roc_auc_score(y_teste, modelo.predict_proba(X_teste)[:, 1]))
+=== code
+# salva o dataset para o time de engenharia colocar em produção
+df[["id_pedido", "dt_venda"] + features + ["is_fraude"]].to_sql(
+    "dataset_fraude", motor(), schema="legado", if_exists="replace", index=False)
+print("legado.dataset_fraude salvo")
+=== md
+Um AUC desses faz qualquer pessoa sorrir. Agora veja o que aconteceu de verdade.
+
+## Parte B — O que aconteceu em produção
+
+O comando abaixo faz o que a produção faz: treina o mesmo tipo de modelo com o
+**passado** e dá nota aos pedidos de julho e agosto, usando para cada coluna **o valor
+que ela tinha no momento da compra** — porque é só isso que existe quando o cliente
+clica em "comprar".
+=== code
+avaliar("legado")
+=== md
+O modelo despencou. E o relatório já dá as primeiras pistas: o grão não é o pedido, e
+algumas colunas **não tinham** aqueles valores na hora da compra.
+
+## Parte C — A investigação
+
+São sete erros. Nenhum é de algoritmo. Todos são de **modelagem de dados**.
+
+### Erro 1 — O grão
+=== code
+print("linhas na tabela :", len(df))
+print("pedidos de verdade:", df.id_pedido.nunique())
+print("linhas por pedido :", round(len(df) / df.id_pedido.nunique(), 2))
+=== md
+A tabela partiu da `fato_pedidos` (grão de **item**) e ainda juntou a `dim_pessoas` pelo
+`id`, que traz **todas as versões** de quem se mudou. Cada pedido virou, em média, mais
+de três exemplos.
+
+### Erro 2 — O mesmo pedido no treino e no teste
+=== code
+pedidos_treino = set(df.loc[X_treino.index, "id_pedido"])
+pedidos_teste  = set(df.loc[X_teste.index, "id_pedido"])
+comuns = pedidos_treino & pedidos_teste
+print("pedidos do teste que o modelo JÁ VIU no treino: %d de %d (%.0f%%)"
+      % (len(comuns), len(pedidos_teste), 100 * len(comuns) / len(pedidos_teste)))
+=== md
+O `train_test_split` sorteou **linhas**, não pedidos. Como cada pedido tem várias linhas,
+a maioria dos pedidos do "teste" estava também no treino. O modelo não estava prevendo:
+estava **lembrando**.
+
+E sortear não respeita o tempo: um modelo em produção só conhece o **passado**. A
+divisão honesta é temporal — treina com os meses antigos, testa nos recentes.
+
+### Erro 3 — A UF de qual época?
+=== code
+(df[df.id_pessoa == 7]
+   .drop_duplicates(["id_pedido", "cidade_cliente"])
+   [["id_pedido", "dt_venda", "cidade_cliente", "uf_cliente"]]
+   .sort_values(["dt_venda", "cidade_cliente"]))
+=== md
+O Ravi Rios se mudou de Barbosa das Pedras para Souza em julho. No notebook, **cada
+pedido dele aparece duas vezes**, uma com cada cidade — inclusive os pedidos de antes
+da mudança aparecem "em Souza", e os de depois, "em Barbosa das Pedras".
+
+O `merge` pelo `id` trouxe todas as versões da pessoa. O certo é perguntar: **onde ela
+morava no dia da compra?** É a pergunta que a `dim_pessoas` responde com `dt_inicio` e
+`dt_fim`.
+
+### Erro 4 — A coluna que contém o rótulo
+=== code
+exemplo = df[df.is_fraude].iloc[0]
+print("pedido %d, cliente %d: is_fraude=%s, taxa_fraude_cliente=%.2f"
+      % (exemplo.id_pedido, exemplo.id_pessoa, exemplo.is_fraude, exemplo.taxa_fraude_cliente))
+print()
+print("taxa_fraude_cliente média quando é fraude    : %.3f" % df[df.is_fraude].taxa_fraude_cliente.mean())
+print("taxa_fraude_cliente média quando NÃO é fraude: %.3f" % df[~df.is_fraude].taxa_fraude_cliente.mean())
+=== md
+`taxa_fraude_cliente` foi calculada com **todos** os pedidos do cliente — inclusive o
+próprio pedido e os que vieram depois. Ela carrega o rótulo dentro dela. Isso tem nome:
+**vazamento de alvo** (*target leakage*). Em produção, na hora da compra, ninguém sabe se
+**este** pedido é fraude.
+
+### Erro 5 — Uma coluna que só existe depois
+=== code
+pd.crosstab(df.drop_duplicates("id_pedido").status, df.drop_duplicates("id_pedido").is_fraude)
+=== md
+`status` é a situação **atual** do pedido. Fraude descoberta antes do envio vira
+`cancelado`. Mas, no momento da compra, **todo** pedido está `criado`. O modelo aprendeu
+"cancelado é suspeito" — uma informação que só aparece dias depois.
+
+### Erro 6 — Um atributo calculado com o futuro
+=== code
+sql("""
+SELECT d.device_id, d.qtd_contas AS qtd_contas_hoje,
+       min(f.dt_venda)          AS primeira_compra_com_o_aparelho
+FROM dim_dispositivo d
+JOIN fato_pedidos f ON f.sk_dispositivo = d.sk_dispositivo
+WHERE d.is_compartilhado
+GROUP BY d.device_id, d.qtd_contas
+ORDER BY d.device_id
+""")
+=== md
+`qtd_contas` na `dim_dispositivo` conta **todas** as contas que **já** usaram o aparelho,
+até o dia da foto. Na primeira compra de um anel de fraude, o valor real era 1 — a
+pessoa ainda estava sozinha no aparelho. O notebook entregou ao modelo o número
+**final**.
+
+### Erro 7 — O rótulo imaturo
+=== code
+pedidos = df.drop_duplicates("id_pedido")
+corte = pedidos.dt_venda.max().normalize() - pd.Timedelta(days=3)
+print("fraude nos pedidos dos últimos 3 dias: %.1f%%" % (100 * pedidos[pedidos.dt_venda >= corte].is_fraude.mean()))
+print("fraude nos pedidos de antes          : %.1f%%" % (100 * pedidos[pedidos.dt_venda <  corte].is_fraude.mean()))
+=== md
+Menos da metade da fraude "normal". Você viu isso na etapa 1: as fraudes dos últimos
+dias ainda não tinham sido descobertas quando a foto foi tirada, e o notebook as usou
+como "não fraude".
+
+## O diagnóstico
+
+| # | Erro | Conceito de modelagem | Onde você conserta |
+|---|---|---|---|
+| 1 | linhas por item e por versão da pessoa | **grão** | etapa 4 |
+| 2 | o mesmo pedido no treino e no teste | grão + **divisão temporal** | etapa 4 |
+| 3 | a UF de hoje no lugar da UF da época | **SCD tipo 2 / point-in-time** | etapa 3 |
+| 4 | `taxa_fraude_cliente` com o próprio rótulo | **vazamento de alvo** | etapa 3 |
+| 5 | `status` depois da compra | **vazamento temporal** | etapa 4 |
+| 6 | `qtd_contas` final | **atributo calculado com o futuro** | etapa 4 |
+| 7 | fraudes ainda não descobertas | **maturação do rótulo** | etapa 4 |
+
+Nenhum modelo melhor conserta isso. A saída é **modelar a tabela de novo** — e é o que
+você vai fazer nas próximas duas etapas.
+=== code
+progresso()
+=== md
+✅ **Etapa 2 concluída.** Você sabe por que o notebook mentia.
+
+➡️ Continue em **`03_feature_table.ipynb`**.

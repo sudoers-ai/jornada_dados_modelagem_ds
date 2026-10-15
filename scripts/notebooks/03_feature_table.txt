@@ -1,0 +1,133 @@
+=== md
+# Etapa 3 — A feature table do cliente
+
+> **Trilha:** 1 · 2 · **3** · 4 · 5 · 6 · 7 — roteiro completo em `trilha/03_feature_table/README.md`
+
+Na etapa 2, o notebook herdado usou o cliente **como ele é hoje** para prever compras do
+passado. Aqui você constrói o antídoto: uma tabela que diz **como cada cliente era em
+cada dia**.
+
+| | |
+|---|---|
+| **Tabela** | `analytics.fs_cliente` |
+| **Grão** | 1 linha por **cliente por dia** |
+| **Regra de ouro** | cada linha diz o que se sabia do cliente no **início** do dia — só com o que aconteceu **até o dia anterior** |
+
+Isso se chama ***feature table point-in-time*** (é o coração de uma *feature store*). Com
+ela, qualquer modelo pode perguntar "como era este cliente no dia X?" e nunca recebe uma
+resposta do futuro.
+=== code
+from liga import sql, executar, conferir, avaliar, progresso
+=== md
+## 3.1 A grade: quantas linhas a tabela vai ter?
+
+Antes de escrever o SQL, calcule o tamanho esperado. É o hábito que pega metade dos
+erros de grão.
+=== code
+sql("""
+SELECT (SELECT count(DISTINCT id) FROM dim_pessoas)                           AS clientes,
+       (SELECT max(dt_venda)::date - min(dt_venda)::date + 1 FROM fato_pedidos) AS dias_no_dw
+""")
+=== md
+500 clientes × 181 dias = **90.500 linhas** (todos os clientes já existiam quando o DW
+começa; se alguém se cadastrasse no meio, a grade dele começaria no dia do cadastro).
+
+A grade tem **todos** os dias, inclusive aqueles em que o cliente não comprou nada.
+Guarde isso: é ela que vai permitir as janelas de tempo da seção 3.3.
+
+## 3.2 Agregar antes de juntar
+
+A feature "quantos pedidos o cliente já fez" conta **pedidos**. A `fato_ciclo_pedido`
+já está nesse grão (uma linha por pedido) — não é preciso partir dos itens.
+=== code
+sql("""
+SELECT p.id AS id_pessoa, c.dt_criado::date AS data, count(*) AS pedidos_no_dia
+FROM fato_ciclo_pedido c
+JOIN dim_pessoas p ON p.sk_pessoa = c.sk_pessoa
+WHERE p.id = 1
+GROUP BY 1, 2
+ORDER BY 2
+""")
+=== md
+> Repare no `JOIN dim_pessoas ON p.sk_pessoa = c.sk_pessoa`: a fato aponta para a
+> **versão** da pessoa (`sk_pessoa`), e é pela `sk` que se junta. Daí se lê o `id`.
+
+## 3.3 A janela "até ontem"
+
+Escolha um dia em que o cliente 1 comprou (veja a saída acima) e compare duas janelas
+para "quantos pedidos o cliente já fez":
+=== code
+sql("""
+WITH dias AS (
+    SELECT t.data, COALESCE(count(c.id_pedido), 0) AS pedidos_no_dia
+    FROM dim_tempo t
+    LEFT JOIN (SELECT c.id_pedido, c.dt_criado
+               FROM fato_ciclo_pedido c
+               JOIN dim_pessoas p ON p.sk_pessoa = c.sk_pessoa
+               WHERE p.id = 1) c ON c.dt_criado::date = t.data
+    WHERE t.data BETWEEN '2026-03-20' AND '2026-03-28'
+    GROUP BY t.data
+)
+SELECT data, pedidos_no_dia,
+       sum(pedidos_no_dia) OVER (ORDER BY data ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+           AS errado_inclui_o_dia,
+       COALESCE(sum(pedidos_no_dia) OVER (ORDER BY data ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING), 0)
+           AS certo_ate_ontem
+FROM dias
+ORDER BY data
+""")
+=== md
+No dia da compra, a coluna `errado_inclui_o_dia` **já conta a própria compra**. Um modelo
+de fraude que use essa feature fica sabendo do pedido que está tentando avaliar.
+
+`ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING` quer dizer: "todas as linhas antes
+desta, **sem** esta". E repare que é uma janela por **linhas**: ela só significa "dias
+anteriores" porque a grade tem **uma linha por dia, sem buracos**.
+
+## 3.4 A UF da época
+
+A UF vem da versão da `dim_pessoas` que valia **naquele dia**:
+=== code
+sql("""
+SELECT t.data, v.sk_pessoa, v.cidade, v.uf
+FROM dim_tempo t
+JOIN dim_pessoas v
+  ON v.id = 7
+ AND t.data::timestamp >= v.dt_inicio
+ AND t.data::timestamp <  COALESCE(v.dt_fim, 'infinity')
+WHERE t.data BETWEEN '2026-06-30' AND '2026-07-04'
+ORDER BY t.data
+""")
+=== md
+Um dia, uma versão. O Ravi se mudou **durante** o dia 2 de julho: no início desse dia
+ele ainda morava em Barbosa das Pedras (`sk_pessoa` 7), e a partir do dia 3 já é a
+versão de Souza (`sk_pessoa` 8). Isso é o **join point-in-time** (ou *as-of join*):
+juntar pela chave **e** pela validade.
+
+## 3.5 Construindo a tabela
+
+Juntando tudo. Leia o SQL antes de rodar: cada bloco do `WITH` é um passo que você viu
+acima, e os comentários dizem qual.
+=== code
+@gabarito 01_fs_cliente.sql
+=== md
+## 3.6 A prova
+=== code
+conferir("fs_cliente")
+=== md
+Se tudo deu ✅, a sua tabela é **idêntica** à referência, linha a linha.
+
+### Experimente errar (opcional, mas recomendado)
+
+Na célula da seção 3.5, troque o primeiro `1 PRECEDING` por `CURRENT ROW` (na janela
+`ate_ontem`), rode a célula e rode a conferência de novo. Veja a conferência apontar a
+coluna errada, com um exemplo e uma dica. Depois desfaça e confira outra vez.
+
+(Se precisar restaurar a resposta certa: `make gabarito t=fs_cliente` no terminal.)
+=== code
+progresso()
+=== md
+✅ **Etapa 3 concluída.** Você tem uma *feature table* sem futuro.
+
+➡️ Continue em **`04_tabela_de_treino.ipynb`**, onde ela vira a base do novo modelo
+antifraude.

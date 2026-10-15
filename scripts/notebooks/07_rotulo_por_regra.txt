@@ -1,0 +1,118 @@
+=== md
+# Etapa 7 — O rótulo definido por regra: a entrega atrasou?
+
+> **Trilha:** 1 · 2 · 3 · 4 · 5 · 6 · **7** — roteiro completo em `trilha/07_rotulo_por_regra/README.md`
+
+Na fraude, o rótulo vinha pronto (alguém confirmou). Muitas vezes ele **não existe** no
+banco: é você que o define, a partir de uma regra de negócio. "Atrasou" é um desses.
+
+| | |
+|---|---|
+| **Tabela** | `analytics.ds_entrega` |
+| **Grão** | 1 linha por **pedido embarcado** num transporte |
+| **Rótulo** | `atrasou` = foi entregue **depois** da data prevista |
+| **A armadilha** | a **censura**: quem ainda não chegou não pode ser julgado |
+=== code
+from liga import sql, executar, conferir, avaliar, progresso
+=== md
+## 7.1 A coluna pronta que não serve
+
+A `fato_entregas` já tem `is_atrasada`. Parece o rótulo perfeito:
+=== code
+sql("""
+SELECT is_entregue, is_atrasada, count(*) AS pedidos
+FROM fato_entregas
+GROUP BY 1, 2
+ORDER BY 1, 2
+""")
+=== md
+Para os pedidos **ainda na estrada** (`is_entregue = false`), o ETL calculou
+`is_atrasada` comparando o prazo com **a hora em que o ETL rodou**. É uma informação de
+acompanhamento ("está atrasado agora?"), e não um rótulo ("chegou atrasado?"). Rode o
+ETL amanhã e o valor muda.
+
+O rótulo honesto só existe para quem **já chegou**.
+
+## 7.2 A censura
+
+Então basta usar só as entregas concluídas? Compare os caminhões que saíram nos últimos
+10 dias antes da foto com os mais antigos:
+=== code
+sql("""
+WITH foto AS (SELECT max(dt_venda) AS momento FROM fato_pedidos)
+SELECT CASE WHEN dt_saida >= foto.momento - interval '10 days'
+            THEN 'saíram nos últimos 10 dias' ELSE 'saíram antes' END        AS grupo,
+       count(*) FILTER (WHERE dt_entrega IS NOT NULL)                      AS ja_chegaram,
+       round(100.0 * avg(CASE WHEN dt_entrega > dt_entrega_prevista THEN 1 ELSE 0 END)
+             FILTER (WHERE dt_entrega IS NOT NULL), 1)                      AS pct_atraso_dos_que_chegaram,
+       count(*) FILTER (WHERE dt_entrega IS NULL)                          AS ainda_na_estrada,
+       count(*) FILTER (WHERE dt_entrega IS NULL
+                          AND dt_entrega_prevista < foto.momento)          AS na_estrada_e_ja_fora_do_prazo
+FROM fato_entregas, foto
+GROUP BY 1
+ORDER BY 1 DESC
+""")
+=== md
+Entre os caminhões recentes, a taxa de atraso dos que chegaram é uma fração da dos
+antigos. Não é a logística melhorando: dos caminhões que saíram há poucos dias, só os
+**rápidos** já chegaram. Os atrasados ainda estão na estrada — a última coluna mostra
+pedidos que já passaram do prazo e não chegaram. Eles são exatamente os atrasos que
+faltam na conta.
+
+Isso se chama **censura**: o desfecho ainda não aconteceu para parte dos casos, e quem já
+tem desfecho não é uma amostra justa. A saída é dar **tempo** ao rótulo: só julgar
+saídas com mais de **10 dias** (o prazo máximo é de 4 dias, e o atraso pode passar de 4).
+As mais recentes ficam com `atrasou` **nulo** e `particao = 'sem_rotulo'`.
+
+É a mesma ideia da maturação da fraude, na etapa 4.
+
+## 7.3 O histórico da transportadora, até a saída
+
+Uma feature valiosa é "quanto essa transportadora costuma atrasar". O jeito ingênuo é
+calcular a taxa com **todas** as entregas — inclusive as que acontecem **depois** desta
+saída. O certo é olhar só as entregas **concluídas antes** de o caminhão partir:
+
+```sql
+(SELECT round(avg(CASE WHEN x.dt_entrega > x.dt_entrega_prevista THEN 1.0 ELSE 0 END), 3)
+   FROM fato_entregas x
+  WHERE x.sk_transportadora = e.sk_transportadora
+    AND x.dt_entrega < e.dt_saida)
+```
+
+É o mesmo cuidado das etapas 3 e 4, agora numa subconsulta.
+
+## 7.4 Construindo a tabela
+=== code
+@gabarito 05_ds_entrega.sql
+=== code
+conferir("ds_entrega")
+=== md
+## 7.5 A descoberta
+
+Com o rótulo honesto, a pergunta da logística tem resposta:
+=== code
+sql("""
+SELECT transportadora,
+       count(*)                                                   AS entregas_julgadas,
+       round(100.0 * avg(CASE WHEN atrasou THEN 1 ELSE 0 END), 1) AS pct_atrasadas
+FROM analytics.ds_entrega
+WHERE atrasou IS NOT NULL
+GROUP BY transportadora
+ORDER BY pct_atrasadas DESC
+""")
+=== md
+Uma transportadora atrasa muito mais que as outras — e é justamente a mais barata por
+quilo (confira o `custo_por_kg` na `dim_transportadora`). Agora o dado está pronto para
+um modelo prever o atraso **antes** de o caminhão sair.
+
+## Fim da trilha
+=== code
+progresso()
+=== md
+🏁 **Você terminou a trilha guiada.**
+
+Em sete etapas, cinco tabelas, e uma ideia só, vista de cinco ângulos: **uma tabela para
+ciência de dados é uma promessa sobre o tempo.** Cada linha diz o que se sabia naquele
+momento — nem mais, nem menos.
+
+➡️ Siga para os **desafios**, em `desafios/desafios.md`.

@@ -1,0 +1,112 @@
+=== md
+# Etapa 5 — O painel cliente × mês
+
+> **Trilha:** 1 · 2 · 3 · 4 · **5** · 6 · 7 — roteiro completo em `trilha/05_painel/README.md`
+
+O time de CRM quer prever **quem vai comprar no mês que vem** (para agir antes de o
+cliente sumir). Para isso, precisa de um **painel**: cada cliente, em cada mês.
+
+| | |
+|---|---|
+| **Tabela** | `analytics.ds_cliente_mes` |
+| **Grão** | 1 linha por **cliente por mês completo** — **inclusive os meses sem compra** |
+| **Rótulo** | `comprou_mes_seguinte` |
+
+A armadilha desta etapa é a mais comum de todas, e quase ninguém percebe: **o mês em que
+o cliente não comprou também é um dado.**
+=== code
+from liga import sql, executar, conferir, avaliar, progresso
+=== md
+## 5.1 O jeito ingênuo
+
+O primeiro SQL que todo mundo escreve:
+=== code
+ingenuo = sql("""
+SELECT p.id AS id_pessoa,
+       date_trunc('month', c.dt_criado)::date AS mes,
+       count(*) AS qtd_pedidos,
+       lead(date_trunc('month', c.dt_criado)::date)
+           OVER (PARTITION BY p.id ORDER BY date_trunc('month', c.dt_criado)) AS proximo_mes_com_compra
+FROM fato_ciclo_pedido c
+JOIN dim_pessoas p ON p.sk_pessoa = c.sk_pessoa
+GROUP BY p.id, date_trunc('month', c.dt_criado)
+""")
+print("linhas:", len(ingenuo))
+ingenuo[ingenuo.id_pessoa == 10]
+=== md
+Três problemas, todos de modelagem:
+
+1. **Faltam linhas.** O `GROUP BY` só cria linha para os meses **com** compra. Os meses em
+   que o cliente não comprou não viram linha nenhuma.
+2. **O "mês seguinte" está errado.** O `LEAD` olha a próxima **linha**, que é o próximo mês
+   **com compra**. O cliente 10 comprou em maio e só voltou em agosto: para a tabela
+   ingênua, o "seguinte" de maio é agosto. Junho e julho, os meses em que ele sumiu —
+   exatamente o que o CRM quer prever — **não existem**.
+3. **Meses pela metade.** Veja abaixo.
+
+## 5.2 Meses completos
+=== code
+sql("""
+SELECT date_trunc('month', dt_criado)::date AS mes,
+       min(dt_criado)::date                 AS primeiro_dia_com_dado,
+       max(dt_criado)::date                 AS ultimo_dia_com_dado,
+       count(*)                             AS pedidos
+FROM fato_ciclo_pedido
+GROUP BY 1
+ORDER BY 1
+""")
+=== md
+O DW começa em **5 de março** e termina em **1º de setembro**. Março e setembro estão
+incompletos: comparar o "março" de um cliente com o "maio" dele é comparar 27 dias com
+31 — e o "setembro" tem um dia só. O painel usa **só meses completos**: de abril a agosto.
+
+## 5.3 A grade
+
+A solução é a mesma da etapa 3: primeiro a **grade** (todo cliente × todo mês completo),
+depois um `LEFT JOIN` das compras, com `0` onde não houve compra.
+=== code
+sql("""
+SELECT (SELECT count(DISTINCT id) FROM dim_pessoas) AS clientes,
+       5                                           AS meses_completos,
+       (SELECT count(DISTINCT id) FROM dim_pessoas) * 5 AS linhas_esperadas
+""")
+=== md
+**2.500 linhas.** Com a grade, o `LEAD` passa a olhar o mês seguinte **do calendário**, e
+o último mês (agosto) fica com o rótulo **nulo**: setembro ainda não aconteceu.
+
+Duas decisões de negócio também estão no SQL, e vale lê-las:
+
+* pedidos **cancelados ou devolvidos não contam** como compra;
+* `qtd_pedidos_3m` soma o mês e os **dois anteriores** — uma janela que olha para trás,
+  nunca para a frente.
+
+## 5.4 Construindo a tabela
+=== code
+@gabarito 03_ds_cliente_mes.sql
+=== code
+conferir("ds_cliente_mes")
+=== md
+## 5.5 O painel em uso
+
+Uma pergunta que o painel responde e a tabela ingênua não conseguiria: quem não comprou
+nos últimos 3 meses volta a comprar?
+=== code
+painel = sql("SELECT * FROM analytics.ds_cliente_mes WHERE comprou_mes_seguinte IS NOT NULL")
+(painel.assign(faixa=painel.qtd_pedidos_3m.clip(upper=4))
+       .groupby("faixa").comprou_mes_seguinte.agg(["count", "mean"])
+       .rename(columns={"count": "clientes_mes", "mean": "taxa_de_recompra"})
+       .round(2))
+=== md
+A linha `faixa = 0` (clientes que **não compraram** nos últimos 3 meses) só existe porque
+a grade criou os meses sem compra. Na tabela ingênua, esses 154 casos simplesmente não
+apareceriam — e um modelo de churn nunca veria um cliente sumindo.
+
+(Neste universo simulado as compras são sorteadas sem "cansaço" do cliente, por isso a
+taxa de recompra é parecida em todas as faixas. O ponto desta etapa não é a taxa: é a
+linha **existir**.)
+=== code
+progresso()
+=== md
+✅ **Etapa 5 concluída.**
+
+➡️ Continue em **`06_serie_temporal.ipynb`**.

@@ -1,0 +1,105 @@
+=== md
+# Etapa 6 — A série temporal do peso transportado
+
+> **Trilha:** 1 · 2 · 3 · 4 · 5 · **6** · 7 — roteiro completo em `trilha/06_serie_temporal/README.md`
+
+A logística quer **prever o peso** que cada transportadora vai levar, para negociar o
+frete. Previsão é série temporal, e série temporal tem uma regra que o SQL ingênuo quebra
+sem avisar: **todo dia precisa existir**.
+
+| | |
+|---|---|
+| **Tabela** | `analytics.ds_peso_dia` |
+| **Grão** | 1 linha por **dia por transportadora** — inclusive os dias sem caminhão |
+| **Features** | o passado da série: o peso de 7 dias antes, a média dos 7 dias anteriores |
+=== code
+from liga import sql, executar, conferir, avaliar, progresso
+=== md
+## 6.1 A série ingênua
+=== code
+ingenua = sql("""
+SELECT t.data, tr.nome AS transportadora, round(d.peso_total_gramas / 1000.0, 2) AS peso_kg
+FROM fato_peso_diario d
+JOIN dim_tempo t           ON t.sk_tempo = d.sk_tempo
+JOIN dim_transportadora tr ON tr.sk_transportadora = d.sk_transportadora
+ORDER BY 1, 2
+""")
+print("linhas:", len(ingenua))
+=== code
+sql("""
+SELECT (SELECT max(dt_saida)::date - min(dt_saida)::date + 1 FROM fato_entregas) AS dias,
+       (SELECT count(*) FROM dim_transportadora)                                  AS transportadoras,
+       (SELECT (max(dt_saida)::date - min(dt_saida)::date + 1) * 5 FROM fato_entregas)
+                                                                                  AS linhas_esperadas
+""")
+=== md
+A `fato_peso_diario` só tem linha nos dias **com caminhão**. Quase metade dos dias de cada
+transportadora simplesmente não está lá. Para a fato isso é correto (ela registra o que
+aconteceu); para uma série temporal, é um buraco.
+
+## 6.2 Por que o buraco importa
+
+Uma feature clássica é "o peso de 7 dias atrás", com `LAG(peso, 7)`. Mas o `LAG` volta 7
+**linhas**, não 7 **dias**:
+=== code
+sql("""
+WITH serie AS (
+    SELECT t.data, round(d.peso_total_gramas / 1000.0, 2) AS peso_kg
+    FROM fato_peso_diario d
+    JOIN dim_tempo t ON t.sk_tempo = d.sk_tempo
+    JOIN dim_transportadora tr ON tr.sk_transportadora = d.sk_transportadora
+    WHERE tr.nome = 'Sudeste Log'
+)
+SELECT data,
+       peso_kg,
+       lag(data, 7) OVER (ORDER BY data)        AS data_que_o_lag_7_pegou,
+       data - lag(data, 7) OVER (ORDER BY data) AS dias_de_distancia_de_verdade
+FROM serie
+ORDER BY data DESC
+LIMIT 8
+""")
+=== md
+"7 dias antes" virou duas semanas antes, ou mais — sem nenhum erro aparecer. O modelo
+aprende com uma feature que não significa o que o nome diz.
+
+## 6.3 A grade, de novo
+
+A solução é a mesma das etapas 3 e 5: **primeiro a grade** — `dim_tempo` × `dim_transportadora`
+—, depois `LEFT JOIN` dos dados, com **zero** onde não houve caminhão. Com uma linha por
+dia, 7 linhas passam a ser 7 dias.
+
+A `dim_tempo` também entrega de graça `dia_semana`, `is_fim_semana` e `is_feriado`:
+features de calendário que uma série precisa.
+
+E a média móvel usa `ROWS BETWEEN 7 PRECEDING AND 1 PRECEDING`: os 7 dias **anteriores**,
+**sem** o próprio dia — senão a feature contém o valor que se quer prever.
+
+## 6.4 Construindo a tabela
+=== code
+@gabarito 04_ds_peso_dia.sql
+=== code
+conferir("ds_peso_dia")
+=== md
+## 6.5 Longo e largo
+
+A tabela está no formato **longo** (*tidy*): uma linha por dia **e** transportadora. É o
+formato certo para guardar e para modelos que tratam várias séries juntas. Para ver as
+séries lado a lado, ou para bibliotecas que esperam uma coluna por série, ela vira
+**larga** com um `pivot`:
+=== code
+serie = sql("SELECT data::timestamp AS data, transportadora, peso_kg FROM analytics.ds_peso_dia")
+larga = serie.pivot(index="data", columns="transportadora", values="peso_kg")
+larga.tail()
+=== code
+larga.resample("W").sum().plot(figsize=(10, 4), title="Peso transportado por semana (kg)");
+=== md
+O contrário — de largo para longo — é o `melt`. É a mesma transformação que um ETL faz
+quando junta os eventos de um pedido numa linha só (a `fato_ciclo_pedido` nasceu assim):
+linhas que viram colunas, e vice-versa. O dado é o mesmo; o formato depende de **quem
+vai ler**.
+=== code
+progresso()
+=== md
+✅ **Etapa 6 concluída.**
+
+➡️ Continue em **`07_rotulo_por_regra.ipynb`**, a última.

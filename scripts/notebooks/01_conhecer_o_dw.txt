@@ -1,0 +1,155 @@
+=== md
+# Etapa 1 — Conhecer o Data Warehouse
+
+> **Trilha:** **1** · 2 · 3 · 4 · 5 · 6 · 7 — roteiro completo em `trilha/01_conhecer_o_dw/README.md`
+
+Você é a nova pessoa de ciência de dados da **Liga Sudoers**. O time de engenharia
+entregou um Data Warehouse pronto, em *star schema*. A sua missão na disciplina é
+transformar esse DW em **tabelas que um modelo consegue usar sem ser enganado**.
+
+Nesta primeira etapa você não constrói nada: você **olha**. Um cientista de dados que
+não entende o grão de cada tabela comete erros que nenhum algoritmo conserta.
+
+**Como usar este notebook:** clique numa célula de código e aperte `Shift + Enter`.
+Rode **todas, em ordem**, de cima para baixo.
+=== code
+# As ferramentas da disciplina. Rode sempre esta célula primeiro.
+from liga import sql, executar, conferir, avaliar, progresso
+=== md
+## 1.1 O que você recebeu
+
+![O DW recebido](../modelagem/img/dw_recebido.svg)
+
+São **4 fatos** (o que aconteceu, com os números) e **7 dimensões** (o contexto).
+A primeira pergunta a fazer sobre qualquer tabela é: **o que é uma linha dela?**
+Isso se chama **grão**.
+=== code
+sql("""
+SELECT 'fato_pedidos'      AS tabela, count(*) AS linhas, 'um ITEM de um pedido'          AS grao FROM fato_pedidos
+UNION ALL
+SELECT 'fato_ciclo_pedido', count(*), 'um PEDIDO'                                            FROM fato_ciclo_pedido
+UNION ALL
+SELECT 'fato_entregas',     count(*), 'um pedido embarcado num caminhão'                    FROM fato_entregas
+UNION ALL
+SELECT 'fato_peso_diario',  count(*), 'um dia de uma transportadora (só dias com caminhão)'  FROM fato_peso_diario
+""")
+=== md
+Repare: são **5.000 pedidos**, mas a `fato_pedidos` tem quase **15 mil linhas**. Ela está no
+grão do **item**. Veja o pedido 1:
+=== code
+sql("""
+SELECT id_pedido, sk_produto, qtde, valor_total, status, is_fraude
+FROM fato_pedidos
+WHERE id_pedido = 1
+""")
+=== md
+Duas linhas, um pedido. O rótulo `is_fraude` se repete nas duas.
+
+> ⚠️ **Armadilha nº 1 — o grão.** Se você treinar um modelo direto nesta tabela, cada
+> pedido vira 2, 3, 4 exemplos. Pedidos grandes pesam mais que pedidos pequenos, e o
+> mesmo pedido pode cair no treino **e** no teste. Para um modelo de fraude, o grão
+> certo é **um pedido**.
+
+## 1.2 A pessoa que se mudou
+
+A `dim_pessoas` guarda o passado (SCD tipo 2): quando alguém se muda, ganha uma
+**versão nova**, com data de validade. Veja o Ravi Rios:
+=== code
+sql("""
+SELECT sk_pessoa, id, nome, cidade, uf, dt_inicio::date, dt_fim::date, is_atual
+FROM dim_pessoas
+WHERE id = 7
+ORDER BY dt_inicio
+""")
+=== code
+sql("""
+SELECT count(*)           AS linhas_na_dimensao,
+       count(DISTINCT id) AS pessoas
+FROM dim_pessoas
+""")
+=== md
+> ⚠️ **Armadilha nº 2 — a época.** Juntar uma tabela com a `dim_pessoas` pelo `id`
+> devolve **todas** as versões da pessoa: as linhas se multiplicam. E, para um modelo,
+> a pergunta certa nunca é "onde a pessoa mora hoje?", e sim **"onde ela morava no dia
+> da compra?"**. A resposta está em `dt_inicio` e `dt_fim`.
+
+## 1.3 A foto
+
+O DW é uma **fotografia** tirada num instante. Tudo que você construir tem esse
+instante como "hoje".
+=== code
+sql("""
+SELECT min(dt_venda) AS primeira_venda,
+       max(dt_venda) AS ultima_venda
+FROM fato_pedidos
+""")
+=== md
+A foto é de **1º de setembro de 2026**. O DW guarda os 180 dias anteriores.
+
+## 1.4 O rótulo chega atrasado
+
+Ninguém sabe que um pedido é fraude na hora da compra. A fraude é **confirmada
+depois**, por um analista, e a data fica em `dt_fraude`:
+=== code
+sql("""
+SELECT motivo_fraude,
+       count(DISTINCT id_pedido)                                              AS pedidos,
+       round(avg(extract(epoch FROM dt_fraude - dt_venda) / 3600)::numeric, 1) AS horas_ate_confirmar_media,
+       round(max(extract(epoch FROM dt_fraude - dt_venda) / 3600)::numeric, 1) AS horas_ate_confirmar_max
+FROM fato_pedidos
+WHERE is_fraude
+GROUP BY motivo_fraude
+ORDER BY pedidos DESC
+""")
+=== md
+Até **4 dias** entre a compra e a confirmação. Agora veja a taxa de fraude por semana,
+no fim do período:
+=== code
+semanas = sql("""
+SELECT date_trunc('week', dt_venda)::date                                AS semana,
+       count(DISTINCT id_pedido)                                         AS pedidos,
+       round(100.0 * count(DISTINCT id_pedido) FILTER (WHERE is_fraude)
+             / count(DISTINCT id_pedido), 1)                             AS pct_fraude
+FROM fato_pedidos
+WHERE dt_venda >= '2026-07-20'
+GROUP BY 1
+ORDER BY 1
+""")
+semanas
+=== code
+semanas.plot(x="semana", y="pct_fraude", kind="bar", legend=False,
+             title="% de fraude por semana da compra", rot=0, figsize=(8, 3));
+=== md
+A última semana tem uma fração da fraude das outras. Não é porque os fraudadores
+tiraram férias: é porque **as fraudes daqueles dias ainda não foram descobertas** quando
+a foto foi tirada.
+
+> ⚠️ **Armadilha nº 3 — o rótulo imaturo.** Os pedidos dos últimos dias parecem
+> "limpos", mas não são. Usá-los para treinar é ensinar ao modelo que pedido recente
+> não é fraude.
+
+## 1.5 O que você vai construir
+
+![A camada analítica](../modelagem/img/analytics.svg)
+
+Cinco tabelas, no schema `analytics`, uma por etapa. Cada uma tem um contrato em
+`modelagem/dbml/analytics.dbml`, e cada etapa termina com uma **conferência** que compara
+a sua tabela com o modelo, linha a linha.
+
+| Etapa | Tabela | O conceito |
+|---|---|---|
+| 3 | `fs_cliente` | *feature table*: o cliente como ele era em cada dia |
+| 4 | `ds_pedido_fraude` | tabela de treino: grão, rótulo maduro, sem futuro |
+| 5 | `ds_cliente_mes` | painel: a grade completa, inclusive o mês sem compra |
+| 6 | `ds_peso_dia` | série temporal: o dia sem caminhão também existe |
+| 7 | `ds_entrega` | rótulo definido por regra, e a censura |
+
+Este é o seu placar. Ele vai ficando verde ao longo da trilha:
+=== code
+progresso()
+=== md
+✅ **Etapa 1 concluída.** Você sabe o grão de cada fato, sabe que o DW guarda o passado e
+sabe que o rótulo chega atrasado.
+
+➡️ Continue em **`02_notebook_herdado.ipynb`** — e prepare-se para ver um modelo excelente
+que não funciona.

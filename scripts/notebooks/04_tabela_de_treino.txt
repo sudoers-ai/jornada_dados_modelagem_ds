@@ -1,0 +1,141 @@
+=== md
+# Etapa 4 — A tabela de treino do antifraude
+
+> **Trilha:** 1 · 2 · 3 · **4** · 5 · 6 · 7 — roteiro completo em `trilha/04_tabela_de_treino/README.md`
+
+Agora você refaz, do jeito certo, a tabela que o notebook herdado usava.
+
+| | |
+|---|---|
+| **Tabela** | `analytics.ds_pedido_fraude` |
+| **Grão** | 1 linha por **pedido** |
+| **Regra de ouro** | toda feature usa **só o que se sabia no momento da compra** |
+| **Rótulo** | `is_fraude`, só quando já está **maduro** |
+| **Divisão** | coluna `particao`, **temporal**: treino no passado, teste depois |
+
+No fim, a prova de fogo: o mesmo `avaliar` que derrubou o notebook herdado.
+=== code
+from liga import sql, executar, conferir, avaliar, progresso
+=== md
+## 4.1 O grão: agregar os itens antes de juntar
+=== code
+sql("""
+SELECT count(*)                  AS linhas_na_fato_pedidos,
+       count(DISTINCT id_pedido) AS pedidos
+FROM fato_pedidos
+""")
+=== md
+A solução é **agregar primeiro**: `GROUP BY id_pedido` na `fato_pedidos`, somando o valor
+dos itens, contando os itens e pegando o aparelho, a UF e o pagamento (iguais em todos os
+itens do mesmo pedido). Só **depois** se junta com as dimensões. Assim cada junção
+encontra uma linha por pedido, e nada se multiplica.
+
+## 4.2 O rótulo e o tempo
+
+Três datas organizam a tabela inteira:
+=== code
+sql("""
+SELECT max(dt_venda)::date                        AS foto,
+       max(dt_venda)::date - 60                   AS fim_do_treino,
+       max(dt_venda)::date - 7                    AS fim_do_teste
+FROM fato_pedidos
+""")
+=== md
+| Pedidos feitos... | `particao` | `is_fraude` | Por quê |
+|---|---|---|---|
+| antes de `fim_do_treino` | `treino` | o rótulo | o passado: onde o modelo aprende |
+| entre os dois | `teste` | o rótulo | o "futuro" do modelo: onde ele é avaliado |
+| nos últimos 7 dias | `sem_rotulo` | **nulo** | a fraude leva até 4 dias para ser descoberta: o rótulo ainda não amadureceu |
+
+A divisão é **temporal**, nunca sorteada: em produção o modelo sempre prevê o futuro com
+o passado. E o rótulo imaturo vira **nulo**, não "falso": "não sabemos ainda" é diferente
+de "não é fraude".
+
+## 4.3 O aparelho, sem futuro
+
+O notebook herdado usava `qtd_contas` da `dim_dispositivo` (o total até a foto). Veja a
+diferença, para os pedidos feitos com aparelhos de anel de fraude:
+=== code
+sql("""
+WITH uso AS (
+    SELECT p.id AS id_pessoa, f.sk_dispositivo, min(f.dt_venda) AS primeiro_uso
+    FROM fato_pedidos f JOIN dim_pessoas p ON p.sk_pessoa = f.sk_pessoa
+    GROUP BY 1, 2
+),
+pedidos AS (
+    SELECT DISTINCT f.id_pedido, f.dt_venda, f.sk_dispositivo, p.id AS id_pessoa
+    FROM fato_pedidos f JOIN dim_pessoas p ON p.sk_pessoa = f.sk_pessoa
+)
+SELECT d.device_id, pd.id_pedido, pd.dt_venda,
+       d.qtd_contas AS notebook_herdado_qtd_contas,
+       (SELECT count(*) FROM uso u
+         WHERE u.sk_dispositivo = pd.sk_dispositivo AND u.id_pessoa <> pd.id_pessoa
+           AND u.primeiro_uso < pd.dt_venda) AS outras_contas_ate_a_compra
+FROM pedidos pd
+JOIN dim_dispositivo d ON d.sk_dispositivo = pd.sk_dispositivo
+WHERE d.device_id = 'd-2ad820ca'
+ORDER BY pd.dt_venda
+LIMIT 8
+""")
+=== md
+Nas primeiras compras do anel, o aparelho ainda era de uma conta só: `0` outras contas.
+O número cresce compra a compra. O notebook herdado dava ao modelo o **5 final** desde a
+primeira compra.
+
+A mesma ideia vale para `is_dispositivo_novo` ("a pessoa nunca tinha usado este aparelho
+**antes desta compra**").
+
+## 4.4 O cliente, no dia da compra
+
+As features do cliente vêm da `fs_cliente` da etapa 3, juntada **pelo dia da compra**:
+
+```sql
+JOIN analytics.fs_cliente fs ON fs.id_pessoa = pe.id AND fs.data = pd.dt_venda::date
+```
+
+É o *as-of join* de novo, agora usando a *feature table*: "como era este cliente no
+início do dia em que comprou". Repare que `taxa_fraude_cliente` **não existe** aqui: a
+única forma honesta dela exigiria saber quais pedidos anteriores **já tinham sido
+confirmados** como fraude no momento da compra — um bom desafio para depois.
+
+## 4.5 Construindo a tabela
+=== code
+@gabarito 02_ds_pedido_fraude.sql
+=== md
+## 4.6 A prova
+=== code
+conferir("ds_pedido_fraude")
+=== md
+## 4.7 A prova de fogo
+
+O mesmo teste que derrubou o notebook herdado, agora com a sua tabela:
+=== code
+avaliar("fraude")
+=== md
+Compare com o notebook herdado:
+=== code
+avaliar("legado")
+=== md
+O seu modelo parece **pior no notebook** do que o herdado — e é **muito melhor em
+produção**. E,
+mais importante: o número que você vê no notebook é o número que a empresa vai ter de
+verdade. É isso que uma boa modelagem de dados entrega a um cientista de dados: **um
+número em que se pode confiar**.
+
+## Os sete erros, corrigidos
+
+| # | Erro do notebook herdado | Como a sua tabela resolve |
+|---|---|---|
+| 1 | linhas por item e por versão | agrega os itens antes de juntar; junta a pessoa pela `sk` |
+| 2 | o mesmo pedido no treino e no teste | `particao` temporal, uma linha por pedido |
+| 3 | UF de hoje | UF de `fs_cliente` no dia da compra |
+| 4 | `taxa_fraude_cliente` com o rótulo | não existe; o histórico vem da `fs_cliente`, só com o passado |
+| 5 | `status` de depois | não existe: o modelo só vê o que existe na compra |
+| 6 | `qtd_contas` final | `qtd_outras_contas_no_dispositivo` até a compra |
+| 7 | rótulo imaturo | `is_fraude` nulo nos últimos 7 dias |
+=== code
+progresso()
+=== md
+✅ **Etapa 4 concluída.** Esta é a etapa central da disciplina.
+
+➡️ Continue em **`05_painel.ipynb`**: outro tipo de tabela, outra armadilha.

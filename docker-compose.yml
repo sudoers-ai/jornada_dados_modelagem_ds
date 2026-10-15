@@ -1,0 +1,67 @@
+# ==========================================================================
+# Liga Sudoers - Modelagem de Dados para Cientistas de Dados
+#
+#   postgres   o Data Warehouse (e o transacional que o alimenta)
+#   jupyter    JupyterLab com pandas e scikit-learn: onde voce trabalha
+#
+# Repositorio AUTOCONTIDO: nao depende de nenhum outro repo no ar.
+# As portas so ficam visiveis na sua maquina (127.0.0.1).
+# ==========================================================================
+name: jornada_dados_modelagem_ds
+
+services:
+
+  postgres:
+    image: postgres:16
+    container_name: modelagem_ds_postgres
+    environment:
+      TZ: America/Sao_Paulo
+      POSTGRES_USER: sudoers
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: liga_sudoers_dw
+    ports:
+      - "127.0.0.1:${PORTA_POSTGRES:-5450}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./carga/ddl/00_criar_bancos.sql:/docker-entrypoint-initdb.d/00_criar_bancos.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U sudoers -d liga_sudoers_dw"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks: [ds_net]
+
+  jupyter:
+    build: ./ferramentas
+    image: jornada_dados_modelagem_ds/jupyter
+    container_name: modelagem_ds_jupyter
+    # roda com o SEU usuario: os notebooks que voce salvar continuam seus
+    user: "${UID:-1000}:${GID:-1000}"
+    environment:
+      TZ: America/Sao_Paulo
+      PGHOST: postgres
+      PGUSER: sudoers
+      PGPASSWORD: password
+      PGDATABASE: liga_sudoers_dw
+      PYTHONPATH: /app
+    ports:
+      - "127.0.0.1:${PORTA_JUPYTER:-8899}:8888"
+    volumes:
+      - ./:/app
+    working_dir: /app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8888/api >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+    networks: [ds_net]
+
+networks:
+  ds_net:
+    name: jornada_dados_modelagem_ds_net
+
+volumes:
+  pgdata:

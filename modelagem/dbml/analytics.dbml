@@ -1,0 +1,123 @@
+// ==========================================================================
+// Liga Sudoers - a CAMADA ANALITICA (schema `analytics`): o seu alvo.
+// Cole este arquivo em https://dbdiagram.io para ver o diagrama.
+//
+// Cada tabela tem um GRAO (o que e uma linha) escrito no topo. Cada coluna
+// tem uma nota com a REGRA que a define. Os comandos `make conferir` leem
+// este arquivo e comparam com a SUA tabela - estrutura e conteudo.
+// ==========================================================================
+
+// --------------------------------------------------------------------------
+// Etapa 3 - FEATURE TABLE do cliente
+// GRAO: 1 linha por cliente por dia.
+// Regra de ouro: cada linha diz o que se sabia do cliente no INICIO do dia,
+// isto e, so com o que aconteceu ATE O DIA ANTERIOR.
+// --------------------------------------------------------------------------
+Table fs_cliente {
+  id_pessoa bigint [not null]
+  data date [not null, note: 'um dia entre o cadastro (ou o 1o dia do DW) e o ultimo dia do DW']
+  uf char(2) [note: 'UF do endereco que valia naquele dia (SCD tipo 2)']
+  dias_de_cadastro integer [note: 'data - dia do cadastro']
+  qtd_pedidos_total integer [note: 'pedidos feitos ANTES deste dia']
+  qtd_pedidos_30d integer [note: 'pedidos nos 30 dias anteriores (sem contar o dia)']
+  valor_medio_pedido numeric [note: 'media do valor dos pedidos anteriores; nulo se nunca comprou']
+  dias_desde_ultimo_pedido integer [note: 'nulo se nunca comprou']
+  qtd_dispositivos integer [note: 'aparelhos diferentes usados antes deste dia']
+
+  indexes {
+    (id_pessoa, data) [pk]
+  }
+}
+
+// --------------------------------------------------------------------------
+// Etapa 4 - TABELA DE TREINO do antifraude
+// GRAO: 1 linha por pedido.
+// Toda feature usa SO o que se sabia no momento da compra.
+// --------------------------------------------------------------------------
+Table ds_pedido_fraude {
+  id_pedido integer [pk]
+  id_pessoa bigint
+  dt_venda timestamp
+  valor_total numeric [note: 'soma dos itens do pedido']
+  qtd_itens integer
+  peso_kg numeric
+  forma_pagamento varchar
+  hora_venda integer
+  is_fim_semana boolean
+  is_fora_da_area boolean [note: 'a compra veio de fora de SP, MG e RJ']
+  is_uf_diferente_do_cadastro boolean [note: 'UF da compra diferente da UF em que a pessoa morava naquele dia']
+  is_dispositivo_novo boolean [note: 'a pessoa nunca tinha usado este aparelho ANTES desta compra']
+  qtd_outras_contas_no_dispositivo integer [note: 'outras pessoas que usaram este aparelho ANTES desta compra']
+  dias_de_cadastro integer [note: 'de fs_cliente, no dia da compra']
+  qtd_pedidos_total integer [note: 'de fs_cliente, no dia da compra']
+  qtd_pedidos_30d integer [note: 'de fs_cliente, no dia da compra']
+  valor_medio_pedido numeric [note: 'de fs_cliente, no dia da compra']
+  dias_desde_ultimo_pedido integer [note: 'de fs_cliente, no dia da compra']
+  qtd_dispositivos integer [note: 'de fs_cliente, no dia da compra']
+  razao_valor_vs_media numeric [note: 'valor_total / valor_medio_pedido']
+  is_fraude boolean [note: 'ROTULO: nulo nos pedidos dos ultimos 7 dias (ainda nao amadureceu)']
+  particao text [note: 'treino (ate 60 dias antes da foto), teste, sem_rotulo (ultimos 7 dias)']
+}
+
+// --------------------------------------------------------------------------
+// Etapa 5 - PAINEL cliente x mes
+// GRAO: 1 linha por cliente por MES COMPLETO - inclusive os meses sem compra.
+// --------------------------------------------------------------------------
+Table ds_cliente_mes {
+  id_pessoa bigint [not null]
+  mes date [not null, note: 'primeiro dia do mes; so meses completos do DW']
+  qtd_pedidos integer [note: 'pedidos validos no mes (sem cancelados e devolvidos); 0 se nao comprou']
+  valor_total numeric [note: '0 se nao comprou']
+  meses_de_cliente integer
+  qtd_pedidos_3m integer [note: 'pedidos no mes e nos 2 anteriores']
+  comprou_mes_seguinte boolean [note: 'ROTULO: nulo no ultimo mes do painel']
+
+  indexes {
+    (id_pessoa, mes) [pk]
+  }
+}
+
+// --------------------------------------------------------------------------
+// Etapa 6 - SERIE TEMPORAL do peso transportado
+// GRAO: 1 linha por dia por transportadora - inclusive os dias sem caminhao.
+// --------------------------------------------------------------------------
+Table ds_peso_dia {
+  data date [not null]
+  id_transportadora integer [not null]
+  transportadora varchar
+  qtd_pedidos integer [note: '0 nos dias sem caminhao']
+  peso_kg numeric [note: '0 nos dias sem caminhao']
+  dia_semana integer
+  is_fim_semana boolean
+  is_feriado boolean
+  peso_kg_7_dias_antes numeric [note: 'nulo nos 7 primeiros dias da serie']
+  media_7_dias_anteriores numeric [note: 'media dos 7 dias ANTERIORES, sem o proprio dia']
+
+  indexes {
+    (data, id_transportadora) [pk]
+  }
+}
+
+// --------------------------------------------------------------------------
+// Etapa 7 - ROTULO DEFINIDO POR REGRA: a entrega atrasou?
+// GRAO: 1 linha por pedido embarcado em um transporte.
+// --------------------------------------------------------------------------
+Table ds_entrega {
+  id_transporte integer [not null]
+  id_pedido integer [not null]
+  dt_saida timestamp
+  transportadora varchar
+  uf_destino char(2)
+  peso_kg numeric
+  peso_caminhao_kg numeric
+  qtd_pedidos_no_caminhao integer
+  prazo_dias integer
+  dia_semana_saida integer
+  taxa_atraso_transportadora numeric [note: 'atrasos da transportadora nas entregas concluidas ANTES desta saida']
+  atrasou boolean [note: 'ROTULO: nulo para saidas dos ultimos 10 dias (ainda nao deu tempo)']
+  particao text [note: 'treino, teste, sem_rotulo']
+
+  indexes {
+    (id_transporte, id_pedido) [pk]
+  }
+}
